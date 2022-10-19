@@ -26,6 +26,8 @@ kj::Array<kj::byte> serializeV8Value(v8::Local<v8::Value> value, v8::Isolate* is
 v8::Local<v8::Value> deserializeV8Value(
     kj::ArrayPtr<const char> key, kj::ArrayPtr<const kj::byte> buf, v8::Isolate* isolate);
 
+class CheckedPut;
+
 class DurableObjectStorageOperations {
   // Common implementation of DurableObjectStorage and DurableObjectTransaction. This class is
   // designed to be used as a mixin.
@@ -120,6 +122,9 @@ public:
       v8::Isolate* isolate);
   jsg::Promise<void> deleteAlarm(jsg::Optional<SetAlarmOptions> options, v8::Isolate* isolate);
 
+  jsg::Ref<CheckedPut> checkPut(kj::String key, v8::Local<v8::Value> value,
+      jsg::Optional<PutOptions> maybeOptions, v8::Isolate* isolate);
+
 protected:
   typedef kj::StringPtr OpName;
   static constexpr OpName OP_GET = "get()"_kj;
@@ -157,14 +162,15 @@ private:
   jsg::Promise<jsg::Value> getMultiple(kj::Array<kj::String> keys, const GetOptions& options,
                                          v8::Isolate* isolate);
 
-  jsg::Promise<void> putOne(kj::String key, v8::Local<v8::Value> value, const PutOptions& options,
-                             v8::Isolate* isolate);
+  jsg::Promise<void> putOne(kj::String key, kj::Array<byte> buffer,
+                             jsg::Optional<PutOptions> maybeOptions, v8::Isolate* isolate);
   jsg::Promise<void> putMultiple(jsg::Dict<v8::Local<v8::Value>> entries,
-                                  const PutOptions& options, v8::Isolate* isolate);
+                                  jsg::Optional<PutOptions> maybeOptions, v8::Isolate* isolate);
 
   jsg::Promise<bool> deleteOne(kj::String key, const PutOptions& options, v8::Isolate* isolate);
   jsg::Promise<int> deleteMultiple(kj::Array<kj::String> keys, const PutOptions& options,
                                     v8::Isolate* isolate);
+  friend CheckedPut;
 };
 
 class DurableObjectTransaction;
@@ -200,6 +206,7 @@ public:
     JSG_METHOD(setAlarm);
     JSG_METHOD(deleteAlarm);
     JSG_METHOD(sync);
+    JSG_METHOD(checkPut);
   }
 
 protected:
@@ -211,6 +218,42 @@ protected:
 
 private:
   IoPtr<ActorCache> cache;
+};
+
+class CheckedPut: public jsg::Object {
+  public:
+    CheckedPut(DurableObjectStorageOperations *storage, kj::String key, kj::Array<byte> value,
+        jsg::Optional<DurableObjectStorageOperations::PutOptions> maybeOptions);
+
+    int getKeySize() { return keySize; }
+    bool getKeyValid() { return keyValid; }
+    int getValueSize() { return valueSize; }
+    bool getValueValid() { return valueValid; }
+    int getUnits() { return units; }
+
+    jsg::Promise<void> commit(v8::Isolate* isolate);
+
+    JSG_RESOURCE_TYPE(CheckedPut) {
+      JSG_READONLY_INSTANCE_PROPERTY(keySize, getKeySize);
+      JSG_READONLY_INSTANCE_PROPERTY(keyValid, getKeyValid);
+      JSG_READONLY_INSTANCE_PROPERTY(valueSize, getValueSize);
+      JSG_READONLY_INSTANCE_PROPERTY(valueValid, getValueValid);
+      JSG_READONLY_INSTANCE_PROPERTY(units, getUnits);
+
+      JSG_METHOD(commit);
+    }
+
+  private:
+    DurableObjectStorageOperations *storage;
+    kj::String key;
+    kj::Array<byte> value;
+    jsg::Optional<DurableObjectStorageOperations::PutOptions> maybeOptions;
+
+    size_t keySize;
+    bool keyValid;
+    int valueSize;
+    bool valueValid;
+    uint32_t units;
 };
 
 class DurableObjectTransaction final: public jsg::Object, public DurableObjectStorageOperations {
@@ -320,6 +363,7 @@ private:
 
 #define EW_ACTOR_STATE_ISOLATE_TYPES                     \
   api::ActorState,                                       \
+  api::CheckedPut,                                       \
   api::DurableObjectState,                               \
   api::DurableObjectTransaction,                         \
   api::DurableObjectStorage,                             \

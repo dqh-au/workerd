@@ -394,11 +394,11 @@ jsg::Promise<void> DurableObjectStorageOperations::put(jsg::Lock& js,
   // TODO(soon): Add tests of data generated at current versions to ensure we'll
   // know before releasing any backwards-incompatible serializer changes,
   // potentially checking the header in addition to the value.
-  auto options = configureOptions(kj::mv(maybeOptions).orDefault(PutOptions{}));
   KJ_SWITCH_ONEOF(keyOrEntries) {
     KJ_CASE_ONEOF(k, kj::String) {
       KJ_IF_MAYBE(v, value) {
-        return putOne(kj::mv(k), *v, options, isolate);
+        auto buffer = serializeV8Value(*v, isolate);
+        return putOne(kj::mv(k), kj::mv(buffer), kj::mv(maybeOptions), isolate);
       } else {
         JSG_FAIL_REQUIRE(TypeError, "put() called with undefined value.");
       }
@@ -413,7 +413,7 @@ jsg::Promise<void> DurableObjectStorageOperations::put(jsg::Lock& js,
               "put() may only be called with a single key-value pair and optional options as put(key, value, options) or with multiple key-value pairs and optional options as put(entries, options)");
         }
       } else {
-        return putMultiple(kj::mv(o), options, isolate);
+        return putMultiple(kj::mv(o), kj::mv(maybeOptions), isolate);
       }
     }
   }
@@ -459,15 +459,15 @@ jsg::Promise<void> DurableObjectStorageOperations::setAlarm(kj::Date scheduledTi
 }
 
 jsg::Promise<void> DurableObjectStorageOperations::putOne(
-    kj::String key, v8::Local<v8::Value> value, const PutOptions& options, v8::Isolate* isolate) {
+    kj::String key, kj::Array<byte> buffer, jsg::Optional<PutOptions> maybeOptions, v8::Isolate* isolate) {
   checkMaxKeySize(key.size());
-  kj::Array<byte> buffer = serializeV8Value(value, isolate);
   if (buffer.size() > ENFORCED_MAX_VALUE_SIZE) {
     jsg::throwRangeError(isolate,
         kj::str("Values cannot be larger than ", ADVERTISED_MAX_VALUE_SIZE, " bytes."));
   }
 
   auto units = billingUnits(key.size() + buffer.size());
+  auto options = configureOptions(kj::mv(maybeOptions).orDefault(PutOptions{}));
 
   jsg::Promise<void> maybeBackpressure = transformMaybeBackpressure(isolate, options,
       getCache(OP_PUT).put(kj::mv(key), kj::mv(buffer), options));
@@ -479,6 +479,27 @@ jsg::Promise<void> DurableObjectStorageOperations::putOne(
   context.addTask(kj::mv(billProm));
 
   return maybeBackpressure;
+}
+
+CheckedPut::CheckedPut(DurableObjectStorageOperations *storage, kj::String key, kj::Array<byte> value,
+    jsg::Optional<DurableObjectStorageOperations::PutOptions> maybeOptions) : storage(storage),
+    key(kj::mv(key)), value(kj::mv(value)), maybeOptions(kj::mv(maybeOptions)) {
+  keySize = this->key.size();
+  keyValid = keySize <= MAX_KEY_SIZE;
+  valueSize = this->value.size();
+  valueValid = valueSize <= ENFORCED_MAX_VALUE_SIZE;
+  units = billingUnits(keySize + valueSize);
+}
+
+jsg::Promise<void> CheckedPut::commit(v8::Isolate* isolate)
+{
+  return this->storage->putOne(kj::mv(this->key), kj::mv(this->value), kj::mv(this->maybeOptions), isolate);
+}
+
+jsg::Ref<CheckedPut> DurableObjectStorageOperations::checkPut(kj::String key, v8::Local<v8::Value> value,
+    jsg::Optional<DurableObjectStorageOperations::PutOptions> maybeOptions, v8::Isolate* isolate) {
+  auto checkedPut = serializeV8Value(value, isolate);
+  return jsg::alloc<CheckedPut>(this, kj::mv(key), kj::mv(checkedPut), maybeOptions);
 }
 
 kj::OneOf<jsg::Promise<bool>, jsg::Promise<int>> DurableObjectStorageOperations::delete_(
@@ -553,7 +574,8 @@ jsg::Promise<jsg::Value> DurableObjectStorageOperations::getMultiple(
 }
 
 jsg::Promise<void> DurableObjectStorageOperations::putMultiple(
-    jsg::Dict<v8::Local<v8::Value>> entries, const PutOptions& options, v8::Isolate* isolate) {
+    jsg::Dict<v8::Local<v8::Value>> entries, jsg::Optional<PutOptions> maybeOptions,
+    v8::Isolate* isolate) {
   if (entries.fields.size() > rpc::ActorStorage::MAX_KEYS) {
     jsg::throwRangeError(isolate,
       kj::str("Maximum number of pairs is ", rpc::ActorStorage::MAX_KEYS, "."));
@@ -580,6 +602,8 @@ jsg::Promise<void> DurableObjectStorageOperations::putMultiple(
 
     kvs.add(ActorCache::KeyValuePair { kj::mv(field.name), kj::mv(buffer) });
   }
+
+  auto options = configureOptions(kj::mv(maybeOptions).orDefault(PutOptions{}));
 
   jsg::Promise<void> maybeBackpressure = transformMaybeBackpressure(isolate, options,
       getCache(OP_PUT).put(kvs.releaseAsArray(), options));
