@@ -460,6 +460,8 @@ public:
 
   void visitForGc(jsg::GcVisitor& visitor);
 
+  size_t consumerCount();
+
 private:
   struct Algorithms {
     kj::Maybe<jsg::Promise<void>> starting;
@@ -746,6 +748,8 @@ public:
     // readAtLeast API.
   }
 
+  bool isPartiallyFulfilled();
+
 private:
   struct Impl {
     kj::Own<ByteQueue::ByobRequest> readRequest;
@@ -758,6 +762,8 @@ private:
          : readRequest(kj::mv(readRequest)),
            controller(kj::mv(controller)),
            view(js.v8Ref(this->readRequest->getView(js))) {}
+
+    void updateView(jsg::Lock& js);
   };
 
   kj::Maybe<Impl> maybeImpl;
@@ -1025,6 +1031,8 @@ private:
       size_t maxBytes,
       size_t amount);
 
+  void maybeDrainAndClose();
+
   IoContext& ioContext;
   kj::OneOf<StreamStates::Closed,
             kj::Exception,
@@ -1032,6 +1040,7 @@ private:
             kj::Own<ByteReadable>> state;
   std::deque<kj::byte> queue;
   bool readPending = false;
+  bool closePending = false;
 };
 
 // =======================================================================================

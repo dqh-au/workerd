@@ -196,12 +196,16 @@ struct TestNested : jsg::Object {
 };
 
 KJ_TEST("nested structure") {
-  KJ_EXPECT(tStructure<TestNested>() == "(name = \"TestNested\", members = [(nested = ("
+  KJ_EXPECT(tStructure<TestNested>() == "(name = \"TestNested\", members = [("
+    "nested = ("
+    "structure = ("
     "name = \"Base\", members = [], "
     "extends = (intrinsic = (name = \"v8::kIteratorPrototype\")), "
     "iterable = false, asyncIterable = false, "
-    "fullyQualifiedName = \"workerd::jsg::rtti::(anonymous namespace)::Base\")"
-    ")], "
+    "fullyQualifiedName = \"workerd::jsg::rtti::(anonymous namespace)::Base\""
+    "), "
+    "name = \"Base\"))"
+    "], "
     "iterable = false, asyncIterable = false, "
     "fullyQualifiedName = \"workerd::jsg::rtti::(anonymous namespace)::TestNested\")");
 }

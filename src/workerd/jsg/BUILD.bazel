@@ -38,6 +38,9 @@ npm_package(
     name = "jsg_js",
     srcs = [":rtti_capnp_js"],
     visibility = ["//visibility:public"],
+    # Required to ensure source files are copied when running internal builds
+    # that depend on `workerd` as an external repository
+    include_external_repositories = ["workerd"],
 )
 
 wd_cc_library(

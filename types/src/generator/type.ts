@@ -125,7 +125,10 @@ export function createParamDeclarationNodes(
 
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
-    let typeNode = createTypeNode(arg, /* forParam */ true);
+    let typeNode = createTypeNode(
+      arg,
+      true // Always allow coercion in method params
+    );
 
     let dotDotDotToken: ts.DotDotDotToken | undefined;
     let questionToken: ts.QuestionToken | undefined;
@@ -173,7 +176,7 @@ export function createParamDeclarationNodes(
   return params;
 }
 
-export function createTypeNode(type: Type, forParam = false): ts.TypeNode {
+export function createTypeNode(type: Type, allowCoercion = false): ts.TypeNode {
   // noinspection FallThroughInSwitchStatementJS
   switch (type.which()) {
     case Type_Which.UNKNOWN:
@@ -193,9 +196,14 @@ export function createTypeNode(type: Type, forParam = false): ts.TypeNode {
         return f.createTypeReferenceNode("number");
       }
     case Type_Which.PROMISE:
-      return f.createTypeReferenceNode("Promise", [
-        createTypeNode(type.getPromise().getValue(), forParam),
-      ]);
+      const value = type.getPromise().getValue();
+      const valueType = createTypeNode(value, allowCoercion);
+      const promiseType = f.createTypeReferenceNode("Promise", [valueType]);
+      if (allowCoercion) {
+        return f.createUnionTypeNode([valueType, promiseType]);
+      } else {
+        return promiseType;
+      }
     case Type_Which.STRUCTURE:
       return f.createTypeReferenceNode(getTypeName(type.getStructure()));
     case Type_Which.STRING:
@@ -207,47 +215,47 @@ export function createTypeNode(type: Type, forParam = false): ts.TypeNode {
       const element = array.getElement();
       if (element.isNumber() && isByteNumber(element.getNumber())) {
         // If the array element is a `byte`...
-        if (forParam) {
-          // When used as a method parameter, `kj::Array<byte>` and
+        if (allowCoercion) {
+          // When coercion is enabled (e.g. method param), `kj::Array<byte>` and
           // `kj::ArrayPtr<byte>` both mean `ArrayBuffer | ArrayBufferView`
           return f.createUnionTypeNode([
             f.createTypeReferenceNode("ArrayBuffer"),
             f.createTypeReferenceNode("ArrayBufferView"),
           ]);
         } else {
-          // Outside of method parameters, `kj::ArrayPtr<byte>` corresponds to
+          // When coercion is disabled, `kj::ArrayPtr<byte>` corresponds to
           // `ArrayBufferView`, whereas `kj::Array<byte>` is `ArrayBuffer`
           return f.createTypeReferenceNode(
             isArrayPointer(array) ? "ArrayBufferView" : "ArrayBuffer"
           );
         }
-      } else if (isIterable(array) && forParam) {
+      } else if (isIterable(array) && allowCoercion) {
         // If this is a `jsg::Sequence` parameter, it should accept any iterable
         return f.createTypeReferenceNode("Iterable", [
-          createTypeNode(element, forParam),
+          createTypeNode(element, allowCoercion),
         ]);
       } else {
         // Otherwise, return a regular array
-        return f.createArrayTypeNode(createTypeNode(element, forParam));
+        return f.createArrayTypeNode(createTypeNode(element, allowCoercion));
       }
     case Type_Which.MAYBE:
       const maybe = type.getMaybe();
       const alternative = isNullMaybe(maybe) ? "null" : "undefined";
       return f.createUnionTypeNode([
-        createTypeNode(maybe.getValue(), forParam),
+        createTypeNode(maybe.getValue(), allowCoercion),
         f.createTypeReferenceNode(alternative),
       ]);
     case Type_Which.DICT:
       const dict = type.getDict();
       return f.createTypeReferenceNode("Record", [
-        createTypeNode(dict.getKey(), forParam),
-        createTypeNode(dict.getValue(), forParam),
+        createTypeNode(dict.getKey(), allowCoercion),
+        createTypeNode(dict.getValue(), allowCoercion),
       ]);
     case Type_Which.ONE_OF:
       const variants = type
         .getOneOf()
         .getVariants()
-        .map((variant) => createTypeNode(variant, forParam));
+        .map((variant) => createTypeNode(variant, allowCoercion));
       return f.createUnionTypeNode(variants);
     case Type_Which.BUILTIN:
       const builtin = type.getBuiltin().getType();
@@ -287,7 +295,10 @@ export function createTypeNode(type: Type, forParam = false): ts.TypeNode {
     case Type_Which.FUNCTION:
       const func = type.getFunction();
       const params = createParamDeclarationNodes(func.getArgs().toArray());
-      const result = createTypeNode(func.getReturnType());
+      const result = createTypeNode(
+        func.getReturnType(),
+        true // Always allow coercion in callback functions
+      );
       return f.createFunctionTypeNode(
         /* typeParams */ undefined,
         params,

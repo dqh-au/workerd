@@ -1,3 +1,10 @@
+// Copyright (c) 2017-2022 Cloudflare, Inc.
+// Licensed under the Apache 2.0 license found in the LICENSE file or at:
+//     https://opensource.org/licenses/Apache-2.0
+
+// Encodes JSG RTTI for all APIs defined in `src/workerd/api` to a capnp binary
+// for consumption by other tools (e.g. TypeScript type generation).
+
 #include <capnp/serialize-packed.h>
 #include <initializer_list>
 #include <kj/filesystem.h>
@@ -102,9 +109,9 @@ struct ApiEncoderMain {
     auto flags = compileFlags(flagsMessage, "2023-01-01", {});
     auto builder = rtti::Builder(flags);
 
-    // Build definition generator request
+    // Build structure groups
     capnp::MallocMessageBuilder message;
-    auto req = message.initRoot<rtti::DefinitionGeneratorRequest>();
+    auto root = message.initRoot<rtti::StructureGroups>();
 
 #define EW_TYPE_GROUP_COUNT(Name, Types) groupsSize++;
 #define EW_TYPE_GROUP_WRITE(Name, Types)                                       \
@@ -112,7 +119,7 @@ struct ApiEncoderMain {
 
     unsigned int groupsSize = 0;
     EW_TYPE_GROUP_FOR_EACH(EW_TYPE_GROUP_COUNT)
-    auto groups = req.initGroups(groupsSize);
+    auto groups = root.initGroups(groupsSize);
     groupsIndex = 0;
     EW_TYPE_GROUP_FOR_EACH(EW_TYPE_GROUP_WRITE)
     KJ_ASSERT(groupsIndex == groupsSize);
@@ -120,7 +127,7 @@ struct ApiEncoderMain {
 #undef EW_TYPE_GROUP_COUNT
 #undef EW_TYPE_GROUP_WRITE
 
-    // Write generator request to a file or stdout if none specifed
+    // Write structure groups to a file or stdout if none specifed
     KJ_IF_MAYBE (value, output) {
       auto fs = kj::newDiskFilesystem();
       auto path = kj::Path::parse(*value);
@@ -146,7 +153,7 @@ struct ApiEncoderMain {
 
   template <typename... Types>
   void writeGroup(
-      capnp::List<rtti::DefinitionGeneratorRequest::StructureGroup>::Builder
+      capnp::List<rtti::StructureGroups::StructureGroup>::Builder
           &groups,
       rtti::Builder<CompatibilityFlags::Reader> &builder, kj::StringPtr name) {
     auto group = groups[groupsIndex++];

@@ -4,7 +4,7 @@ import { mkdir, readFile, writeFile } from "fs/promises";
 import path from "path";
 import { arrayBuffer } from "stream/consumers";
 import util from "util";
-import { DefinitionGeneratorRequest } from "@workerd/jsg/rtti.capnp.js";
+import { StructureGroups } from "@workerd/jsg/rtti.capnp.js";
 import { Message } from "capnp-ts";
 import prettier from "prettier";
 import ts from "typescript";
@@ -20,9 +20,9 @@ const definitionsHeader = `/* eslint-disable */
 // noinspection JSUnusedGlobalSymbols
 `;
 
-function printDefinitions(req: DefinitionGeneratorRequest): string {
+function printDefinitions(root: StructureGroups): string {
   // Generate TypeScript nodes from capnp request
-  const nodes = generateDefinitions(req);
+  const nodes = generateDefinitions(root);
 
   // Build TypeScript program from nodes
   const source = printNodeList(nodes);
@@ -49,7 +49,23 @@ function printDefinitions(req: DefinitionGeneratorRequest): string {
   return definitionsHeader + printer.printFile(result.transformed[0]);
 }
 
-async function main() {
+// Generates TypeScript types from a binary Cap’n Proto file containing encoded
+// JSG RTTI. See src/workerd/tools/api-encoder.c++ for a script that generates
+// input expected by this tool.
+//
+// To generate types using default options, run `bazel build //types:types`.
+//
+// Usage: types [options] [input]
+//
+// Options:
+//  -o, --output <file>
+//    File path to write TypeScript to, defaults to stdout if omitted
+//  -f, --format
+//    Formats generated types with Prettier
+//
+// Input:
+//    Binary Cap’n Proto file path, defaults to reading from stdin if omitted
+export async function main(args?: string[]) {
   const { values: options, positionals } = util.parseArgs({
     options: {
       output: { type: "string", short: "o" },
@@ -57,6 +73,7 @@ async function main() {
     },
     strict: true,
     allowPositionals: true,
+    args,
   });
   const maybeInputPath = positionals[0];
 
@@ -65,9 +82,9 @@ async function main() {
       ? await arrayBuffer(process.stdin)
       : await readFile(maybeInputPath);
   const message = new Message(buffer, /* packed */ false);
-  const req = message.getRoot(DefinitionGeneratorRequest);
+  const root = message.getRoot(StructureGroups);
 
-  let definitions = printDefinitions(req);
+  let definitions = printDefinitions(root);
   if (options.format) {
     definitions = prettier.format(definitions, { parser: "typescript" });
   }

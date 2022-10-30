@@ -352,7 +352,13 @@ void ByteQueue::ByobRequest::invalidate() {
   }
 }
 
-void ByteQueue::ByobRequest::respond(jsg::Lock& js, size_t amount) {
+bool ByteQueue::ByobRequest::isPartiallyFulfilled() {
+  return !isInvalidated() &&
+         getRequest().pullInto.filled > 0 &&
+         getRequest().pullInto.store.getElementSize() > 1;
+}
+
+bool ByteQueue::ByobRequest::respond(jsg::Lock& js, size_t amount) {
   // So what happens here? The read request has been fulfilled directly by writing
   // into the storage buffer of the request. Unfortunately, this will only resolve
   // the data for the one consumer from which the request was received. We have to
@@ -375,10 +381,10 @@ void ByteQueue::ByobRequest::respond(jsg::Lock& js, size_t amount) {
     // other consumers of the queue.
     auto entry = kj::refcounted<Entry>(jsg::BackingStore::alloc(js, amount));
 
+    auto start = sourcePtr.begin() + req.pullInto.filled;
+
     // Safely copy the data over into the entry.
-    std::copy(sourcePtr.begin(),
-              sourcePtr.begin() + amount,
-              entry->toArrayPtr().begin());
+    std::copy(start, start + amount, entry->toArrayPtr().begin());
 
     // Push the entry into the other consumers.
     queue.push(js, kj::mv(entry), consumer);
@@ -389,6 +395,22 @@ void ByteQueue::ByobRequest::respond(jsg::Lock& js, size_t amount) {
   // those extra bytes and push them into the consumers queue so they can be picked
   // up by the next read.
   req.pullInto.filled += amount;
+
+  if (amount < req.pullInto.atLeast) {
+    // The response has not yet met the minimal requirement of this byob read.
+    // In this case, we do not want to resolve the read yet, and we do not
+    // want the byob request to be invalidated. We don't need to worry about
+    // unaligned bytes yet. We're just going to return false to tell the caller
+    // not to invalidate and to update the view over this store.
+
+    // We do want to decrease the atLeast by the amount of bytes we received.
+    req.pullInto.atLeast -= amount;
+    return false;
+  }
+
+  // There is no need to adjust the pullInto.atLeast here because we are resolving
+  // the read immediately.
+
   auto unaligned = req.pullInto.filled % req.pullInto.store.getElementSize();
   // It is possible that the request was partially filled already.
   req.pullInto.filled -= unaligned;
@@ -402,9 +424,11 @@ void ByteQueue::ByobRequest::respond(jsg::Lock& js, size_t amount) {
     std::copy(start, start + unaligned, excess->toArrayPtr().begin());
     consumer.push(js, kj::mv(excess));
   }
+
+  return true;
 }
 
-void ByteQueue::ByobRequest::respondWithNewView(jsg::Lock& js, jsg::BufferSource view) {
+bool ByteQueue::ByobRequest::respondWithNewView(jsg::Lock& js, jsg::BufferSource view) {
   // The idea here is that rather than filling the view that the controller was given,
   // it chose to create it's own view and fill that, likely over the same ArrayBuffer.
   // What we do here is perform some basic validations on what we were given, and if
@@ -425,7 +449,7 @@ void ByteQueue::ByobRequest::respondWithNewView(jsg::Lock& js, jsg::BufferSource
                "The view is not the correct length.");
 
   req.pullInto.store = view.detach(js);
-  respond(js, amount);
+  return respond(js, amount);
 }
 
 size_t ByteQueue::ByobRequest::getAtLeast() const {
@@ -519,6 +543,7 @@ void ByteQueue::handlePush(
     if (amountAvailable < pending.pullInto.atLeast) {
       return bufferData(0);
     }
+
     // There might be at least some data in the buffer. If there is, it should
     // not be more than the current pending.pullInfo.atLeast or something went
     // wrong somewhere else.
@@ -557,12 +582,12 @@ void ByteQueue::handlePush(
           state.buffer.pop_front();
 
           pending.pullInto.filled += sourceSize;
+
+          // There is no reason to adjust the pullInto.atLeast here because we
+          // will be immediately resolving the read in the next step.
+
           state.queueTotalSize -= sourceSize;
           amountAvailable -= sourceSize;
-
-          // It shouldn't be possible for us to have already met the atLeast requirement
-          // for the pending read here!
-          KJ_REQUIRE(pending.pullInto.filled < pending.pullInto.atLeast);
         }
       }
     }
@@ -573,11 +598,8 @@ void ByteQueue::handlePush(
     // And there should be data remaining in the pending pullInto destination.
     KJ_REQUIRE(pending.pullInto.filled < pending.pullInto.store.size());
 
-    // And the pending.pullInfo.filled should still be below the pendingPullInto.atLeast.
-    KJ_REQUIRE(pending.pullInto.filled < pending.pullInto.atLeast);
-
     // And the amountAvailable should be equal to the current push size.
-    KJ_REQUIRE(amountAvailable == entrySize);
+    KJ_REQUIRE(amountAvailable == entrySize - entryOffset);
 
     // Now, we determine how much of the current entry we can copy into the
     // destination pullInto by taking the lesser of amountAvailable and
@@ -610,6 +632,9 @@ void ByteQueue::handlePush(
     amountAvailable -= amountToCopy;
     entryOffset += amountToCopy;
     pending.pullInto.filled += amountToCopy;
+
+    // We do not need to adjust the pullInto.atLeast here since we are immediately
+    // fulfilling the read at this point.
 
     pending.resolve(js);
     state.readRequests.pop_front();
@@ -671,6 +696,13 @@ void ByteQueue::handleRead(
           auto entrySize = entry.entry->getSize();
           auto amountToCopy = kj::min(entrySize - entry.offset,
                                       request.pullInto.store.size() - request.pullInto.filled);
+          auto elementSize = request.pullInto.store.getElementSize();
+          if (amountToCopy > elementSize) {
+            amountToCopy -= amountToCopy % elementSize;
+          }
+          if (amountToConsume > elementSize) {
+            amountToConsume -= amountToConsume % elementSize;
+          }
 
           // Once we have the amount, we safely copy amountToCopy bytes from the
           // entry into the destination request, accounting properly for the offsets.
@@ -680,6 +712,15 @@ void ByteQueue::handleRead(
           std::copy(sourcePtr, sourcePtr + amountToCopy, destPtr);
 
           request.pullInto.filled += amountToCopy;
+
+          // If pullInto.atLeast is greater than amountToCopy, let's adjust
+          // atLeast down by the number of bytes we've consumed, indicating
+          // a smaller minimum read requirement.
+          if (request.pullInto.atLeast > amountToCopy) {
+            request.pullInto.atLeast -= amountToCopy;
+          } else if (request.pullInto.atLeast == amountToCopy) {
+            request.pullInto.atLeast = 1;
+          }
           entry.offset += amountToCopy;
           amountToConsume -= amountToCopy;
           state.queueTotalSize -= amountToCopy;
@@ -709,6 +750,7 @@ void ByteQueue::handleRead(
   if (state.readRequests.empty() && state.queueTotalSize > 0) {
     // If the available size is less than the read requests atLeast, then
     // push the read request into the pending so we can wait for more data...
+
     if (state.queueTotalSize < request.pullInto.atLeast) {
       // If there is anything in the consumers queue at this point, We need to
       // copy those bytes into the byob buffer and advance the filled counter
@@ -724,6 +766,7 @@ void ByteQueue::handleRead(
     // of the queue total size and the maximum amount of space in the request
     // pull into.
     if (consume(kj::min(state.queueTotalSize, request.pullInto.store.size()))) {
+
       // If consume returns true, the consumer hit the end and we need to
       // just resolve the request as done and return.
       return request.resolveAsDone(js);
@@ -814,8 +857,11 @@ bool ByteQueue::handleMaybeClose(
 
           // Safely copy amountToCopy bytes from the source into the destination.
           std::copy(sourceStart, sourceEnd, destPtr);
-
           pending.pullInto.filled += amountToCopy;
+
+          // We do not need to adjust down the atLeast here because, no matter what,
+          // the read is going to be resolved either here or in the next iteration.
+
           state.queueTotalSize -= amountToCopy;
           entry.offset += amountToCopy;
 
@@ -919,7 +965,7 @@ bool ByteQueue::hasPartiallyFulfilledRead() {
   KJ_IF_MAYBE(state, impl.getState()) {
     if (!state->pendingByobReadRequests.empty()) {
       auto& pending = state->pendingByobReadRequests.front();
-      if (!pending->isInvalidated() && pending->getRequest().pullInto.filled > 0) {
+      if (pending->isPartiallyFulfilled()) {
         return true;
       }
     }

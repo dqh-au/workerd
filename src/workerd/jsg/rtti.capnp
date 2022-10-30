@@ -254,7 +254,7 @@ struct Constructor {
   args @0 :List(Type);
 }
 
-struct DefinitionGeneratorRequest {
+struct StructureGroups {
   # Collection of structure groups, consumed by TypeScript definitions generator
 
   groups @0 :List(StructureGroup);

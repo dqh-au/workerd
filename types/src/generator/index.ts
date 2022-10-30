@@ -1,11 +1,11 @@
 import assert from "assert";
 import {
-  DefinitionGeneratorRequest,
   FunctionType,
   Member,
   Member_Which,
   Method,
   Structure,
+  StructureGroups,
   Type,
   Type_Which,
 } from "@workerd/jsg/rtti.capnp.js";
@@ -14,9 +14,9 @@ import { createStructureNode } from "./structure";
 
 type StructureMap = Map<string, Structure>;
 // Builds a lookup table mapping type names to structures
-function collectStructureMap(req: DefinitionGeneratorRequest): StructureMap {
+function collectStructureMap(root: StructureGroups): StructureMap {
   const map = new Map<string, Structure>();
-  req.getGroups().forEach((group) => {
+  root.getGroups().forEach((group) => {
     group.getStructures().forEach((structure) => {
       map.set(structure.getFullyQualifiedName(), structure);
     });
@@ -29,6 +29,7 @@ function collectStructureMap(req: DefinitionGeneratorRequest): StructureMap {
 // TODO(soon): replace this with a macro like JSG_TS_ROOT or JSG_TS_BINDING_TYPE
 const TYPE_ROOTS = [
   "workerd::api::ServiceWorkerGlobalScope",
+  "workerd::api::ExportedHandler",
   "workerd::api::DurableObjectNamespace",
   "workerd::api::AnalyticsEngine",
   "workerd::api::KvNamespace",
@@ -148,15 +149,13 @@ function collectClasses(map: StructureMap): Set<string> {
   return classes;
 }
 
-export function generateDefinitions(
-  req: DefinitionGeneratorRequest
-): ts.Node[] {
-  const map = collectStructureMap(req);
+export function generateDefinitions(root: StructureGroups): ts.Node[] {
+  const map = collectStructureMap(root);
   const included = collectIncluded(map);
   const classes = collectClasses(map);
 
   // Can't use `flatMap()` here as `getGroups()` returns a `capnp.List`
-  const nodes = req.getGroups().map((group) => {
+  const nodes = root.getGroups().map((group) => {
     const structureNodes: ts.Node[] = [];
     group.getStructures().forEach((structure) => {
       const name = structure.getFullyQualifiedName();
